@@ -12,6 +12,7 @@ Resource Property	Supplemental Names Property
 reg			reg-names
 clocks			clock-names
 interrupts		interrupt-names
+memory-region		memory-region-names
 
 Usage:
 

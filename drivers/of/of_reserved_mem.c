@@ -21,6 +21,7 @@
 #include <linux/sizes.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/sort.h>
+#include <linux/slab.h>
 
 #define MAX_RESERVED_REGIONS	16
 static struct reserved_mem reserved_mem[MAX_RESERVED_REGIONS];
@@ -287,53 +288,116 @@ static inline struct reserved_mem *__find_rmem(struct device_node *node)
 	return NULL;
 }
 
+struct rmem_assigned_device {
+	struct device *dev;
+	struct reserved_mem *rmem;
+	struct list_head list;
+};
+
+static LIST_HEAD(of_rmem_assigned_device_list);
+static DEFINE_MUTEX(of_rmem_assigned_device_mutex);
+
 /**
  * of_reserved_mem_device_init() - assign reserved memory region to given device
+ * @dev:	Pointer to the device to configure
+ * @np:		Pointer to the device_node with 'reserved-memory' property
+ * @idx:	Index of selected region
  *
- * This function assign memory region pointed by "memory-region" device tree
- * property to the given device.
+ * This function assigns respective DMA-mapping operations based on reserved
+ * memory region specified by 'memory-region' property in @np node to the @dev
+ * device. When driver needs to use more than one reserved memory region, it
+ * should allocate child devices and initialize regions by name for each of
+ * child device.
+ *
+ * Returns error code or zero on success.
  */
-int of_reserved_mem_device_init(struct device *dev)
+int of_reserved_mem_init(struct device *dev, struct device_node *np, int idx)
 {
+	struct rmem_assigned_device *rd;
+	struct device_node *target;
 	struct reserved_mem *rmem;
-	struct device_node *np;
 	int ret;
 
-	np = of_parse_phandle(dev->of_node, "memory-region", 0);
-	if (!np)
-		return -ENODEV;
+	if (!np || !dev)
+		return -EINVAL;
 
-	rmem = __find_rmem(np);
-	of_node_put(np);
+	target = of_parse_phandle(np, "memory-region", idx);
+	if (!target)
+		return -EINVAL;
+
+	rmem = __find_rmem(target);
+	of_node_put(target);
 
 	if (!rmem || !rmem->ops || !rmem->ops->device_init)
 		return -EINVAL;
 
+	rd = kmalloc(sizeof(struct rmem_assigned_device), GFP_KERNEL);
+	if (!rd)
+		return -ENOMEM;
+
 	ret = rmem->ops->device_init(rmem, dev);
-	if (ret == 0)
+	if (ret == 0) {
+		rd->dev = dev;
+		rd->rmem = rmem;
+
+		mutex_lock(&of_rmem_assigned_device_mutex);
+		list_add(&rd->list, &of_rmem_assigned_device_list);
+		mutex_unlock(&of_rmem_assigned_device_mutex);
+
 		dev_info(dev, "assigned reserved memory node %s\n", rmem->name);
+	} else {
+		kfree(rd);
+	}
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(of_reserved_mem_device_init);
+EXPORT_SYMBOL_GPL(of_reserved_mem_init);
+
+/**
+ * of_reserved_mem_device_init() - assign reserved memory region to given device
+ * @dev:	Pointer to the device to configure
+ * @np:		Pointer to the device_node with 'reserved-memory' property
+ * @name:	Name of the selected region
+ *
+ * This function assigns respective DMA-mapping operations based on reserved
+ * memory region specified by 'memory-region' property in @np node, named @name
+ * to the @dev device.
+ *
+ * Returns error code or zero on success.
+ */
+int of_reserved_mem_init_by_name(struct device *dev, struct device_node *np,
+					   const char *name)
+{
+	int idx = of_property_match_string(np, "memory-region-names", name);
+
+	if (idx < 0)
+		return -EINVAL;
+	return of_reserved_mem_init(dev, np, idx);
+}
+EXPORT_SYMBOL_GPL(of_reserved_mem_init_by_name);
 
 /**
  * of_reserved_mem_device_release() - release reserved memory device structures
+ * @dev:	Pointer to the device to deconfigure
  *
  * This function releases structures allocated for memory region handling for
  * the given device.
  */
 void of_reserved_mem_device_release(struct device *dev)
 {
-	struct reserved_mem *rmem;
-	struct device_node *np;
+	struct rmem_assigned_device *rd;
+	struct reserved_mem *rmem = NULL;
 
-	np = of_parse_phandle(dev->of_node, "memory-region", 0);
-	if (!np)
-		return;
-
-	rmem = __find_rmem(np);
-	of_node_put(np);
+	mutex_lock(&of_rmem_assigned_device_mutex);
+	list_for_each_entry(rd, &of_rmem_assigned_device_list, list) {
+		if (rd->dev == dev) {
+			rmem = rd->rmem;
+			list_del(&rd->list);
+			kfree(rd);
+			break;
+		}
+	}
+	mutex_unlock(&of_rmem_assigned_device_mutex);
 
 	if (!rmem || !rmem->ops || !rmem->ops->device_release)
 		return;
