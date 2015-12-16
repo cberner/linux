@@ -1564,6 +1564,7 @@ static int fimc_lite_probe(struct platform_device *pdev)
 			goto err_sd;
 	}
 
+	vb2_dma_contig_set_max_seg_size(dev, DMA_BIT_MASK(32));
 	fimc->alloc_ctx = vb2_dma_contig_init_ctx(dev);
 	if (IS_ERR(fimc->alloc_ctx)) {
 		ret = PTR_ERR(fimc->alloc_ctx);

@@ -2839,6 +2839,7 @@ static int s5p_jpeg_probe(struct platform_device *pdev)
 		goto device_register_rollback;
 	}
 
+	vb2_dma_contig_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
 	jpeg->alloc_ctx = vb2_dma_contig_init_ctx(&pdev->dev);
 	if (IS_ERR(jpeg->alloc_ctx)) {
 		v4l2_err(&jpeg->v4l2_dev, "Failed to init memory allocator\n");
